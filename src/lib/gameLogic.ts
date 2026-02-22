@@ -163,13 +163,6 @@ const newPokemon: Pokemon = {
   volatileStatus: newVolatile
 };
 
-  // Struggle: recoil is 1/4 of the user's max HP (not based on damage)
-  if (move.name === "Struggle") {
-    const recoil = Math.floor(attacker.maxHp / 4);
-    attacker = { ...attacker, currentHp: Math.max(0, attacker.currentHp - recoil) };
-    messages.push(`${attacker.name} was hurt by recoil!`);
-  }
-
   return {
     pokemon: newPokemon,
     message: getStatusMessage(pokemon.name, status),
@@ -299,6 +292,13 @@ export const executeMove = (
       defender = result.defender;
     }
   }
+// Struggle recoil: 1/4 of user's max HP (Gen-style)
+if (move.name === "Struggle") {
+  const recoil = Math.floor(attacker.maxHp / 4);
+  attacker = { ...attacker, currentHp: Math.max(0, attacker.currentHp - recoil) };
+  messages.push(`${attacker.name} was hurt by recoil!`);
+}
+
 
   return { 
     attacker, 
