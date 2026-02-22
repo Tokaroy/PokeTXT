@@ -129,6 +129,8 @@ function App() {
     pendingMoveLearn: null
   });
 
+  const [martMessage, setMartMessage] = useState<string>('');
+
   const [battleState, setBattleState] = useState<BattleState | null>(null);
   // Keep latest state in refs for timeouts / async turn resolution
   const battleStateRef = useRef<BattleState | null>(null);
@@ -674,12 +676,18 @@ const executeTurn = (playerMove: Move, opponentMove: Move) => {
   // Execute player move selection
   const executePlayerMove = (move: Move) => {
     if (!battleState || isProcessingTurn) return;
-    
+
     // Check if player has any PP left on any move
     const playerPokemon = battleState.playerActive;
     const hasAnyPP = playerPokemon.moves.some(m => m.currentPp > 0);
-    
-    // If no PP left, use Struggle
+
+    // If the player still has PP on SOME move, you cannot select a move with 0 PP
+    if (hasAnyPP && move.name !== 'Struggle' && move.currentPp <= 0) {
+      addMessage(`${playerPokemon.name} has no PP left for ${move.name}!`);
+      return;
+    }
+
+    // If no PP left on ANY move, use Struggle
     const actualMove = hasAnyPP ? move : STRUGGLE;
     if (!hasAnyPP && move.name !== 'Struggle') {
       addMessage(`${playerPokemon.name} has no PP left!`);
@@ -1632,6 +1640,14 @@ if (opponentPokemon.currentHp <= 0) {
             PokeCenter
           </Button>
           <Button 
+            onClick={() => setGameState(prev => ({ ...prev, screen: 'pokemart' }))} 
+            variant="default" 
+            className="h-20 bg-blue-500 hover:bg-blue-600"
+          >
+            <span className="mr-2">🏪</span>
+            PokeMart
+          </Button>
+          <Button 
             onClick={() => startTrainerBattle(GYM_LEADERS[Math.min(gameState.badges.length, 7)])} 
             variant="default" 
             className="h-20 bg-gradient-to-r from-yellow-500 to-orange-500"
@@ -2023,6 +2039,84 @@ if (opponentPokemon.currentHp <= 0) {
     </div>
   );
 
+const renderPokeMart = () => {
+  const martItems = GEN1_ITEMS.filter(i =>
+    i.price > 0 &&
+    (i.type === "PokeBall" || i.type === "Potion" || i.type === "StatusHeal" || i.type === "Other")
+  );
+
+  const getQty = (itemId: number) => {
+    const found = gameState.bag.find(b => b.item.id === itemId);
+    return found ? found.quantity : 0;
+  };
+
+  const buyItem = (item: Item) => {
+    setGameState(prev => {
+      if (prev.money < item.price) {
+        setMartMessage(`Not enough money for ${item.name}!`);
+        return prev;
+      }
+      const existing = prev.bag.find(b => b.item.id === item.id);
+      const newBag = existing
+        ? prev.bag.map(b => b.item.id === item.id ? { ...b, quantity: b.quantity + 1 } : b)
+        : [...prev.bag, { item, quantity: 1 }];
+
+      setMartMessage(`Bought 1 ${item.name} for $${item.price}.`);
+      return { ...prev, money: prev.money - item.price, bag: newBag };
+    });
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-4">
+      <div className="max-w-4xl mx-auto">
+        <div className="bg-white rounded-lg shadow-md p-4 mb-4 flex justify-between items-center">
+          <div>
+            <h2 className="text-2xl font-bold">🏪 Poké Mart</h2>
+            <p className="text-gray-600">Money: <span className="font-bold">${gameState.money}</span></p>
+          </div>
+          <Button
+            onClick={() => {
+              setMartMessage('');
+              setGameState(prev => ({ ...prev, screen: 'overworld' }));
+            }}
+            variant="outline"
+          >
+            Back
+          </Button>
+        </div>
+
+        {martMessage && (
+          <div className="bg-blue-50 border border-blue-200 text-blue-900 rounded-lg p-3 mb-4">
+            {martMessage}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {martItems.map(item => (
+            <Card key={item.id} className="bg-white">
+              <CardContent className="p-4 flex justify-between items-start">
+                <div className="pr-4">
+                  <div className="font-bold">{item.name}</div>
+                  <div className="text-sm text-gray-600">{item.description}</div>
+                  <div className="text-sm mt-2">
+                    <span className="font-semibold">Price:</span> ${item.price}
+                    <span className="ml-3 text-gray-500">In Bag: {getQty(item.id)}</span>
+                  </div>
+                </div>
+                <Button onClick={() => buyItem(item)} className="shrink-0">
+                  Buy
+                </Button>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+
   const renderBattle = () => {
     if (!battleState) return null;
     
@@ -2241,23 +2335,40 @@ if (opponentPokemon.currentHp <= 0) {
               {battleMenu === 'moves' && (
                 <div>
                   <div className="grid grid-cols-2 gap-2 mb-4">
-                    {playerPokemon.moves.map((move, i) => (
+                    {playerPokemon.moves.every(m => m.currentPp <= 0) ? (
                       <Button
-                        key={i}
-                        onClick={() => executePlayerMove(move)}
-                        disabled={move.currentPp <= 0 || isProcessingTurn}
-                        variant={move.currentPp > 0 ? 'default' : 'ghost'}
-                        className="h-16 justify-between"
+                        onClick={() => executePlayerMove(STRUGGLE)}
+                        disabled={isProcessingTurn}
+                        variant="destructive"
+                        className="h-16 justify-between col-span-2"
                       >
                         <div className="text-left">
-                          <div className="font-bold">{move.name}</div>
-                          <div className="text-xs opacity-80">{move.type} • {move.category}</div>
+                          <div className="font-bold">{STRUGGLE.name}</div>
+                          <div className="text-xs opacity-80">{STRUGGLE.type} • {STRUGGLE.category}</div>
                         </div>
                         <div className="text-right text-sm">
-                          {move.currentPp}/{move.maxPp}
+                          ∞
                         </div>
                       </Button>
-                    ))}
+                    ) : (
+                      playerPokemon.moves.map((move, i) => (
+                        <Button
+                          key={i}
+                          onClick={() => executePlayerMove(move)}
+                          disabled={move.currentPp <= 0 || isProcessingTurn}
+                          variant={move.currentPp > 0 ? 'default' : 'ghost'}
+                          className="h-16 justify-between"
+                        >
+                          <div className="text-left">
+                            <div className="font-bold">{move.name}</div>
+                            <div className="text-xs opacity-80">{move.type} • {move.category}</div>
+                          </div>
+                          <div className="text-right text-sm">
+                            {move.currentPp}/{move.maxPp}
+                          </div>
+                        </Button>
+                      ))
+                    )}
                   </div>
                   <Button onClick={() => setBattleMenu('main')} variant="outline" className="w-full" disabled={isProcessingTurn}>
                     Back
@@ -2336,6 +2447,7 @@ if (opponentPokemon.currentHp <= 0) {
       {gameState.screen === 'title' && renderTitleScreen()}
       {gameState.screen === 'starter' && renderStarterSelection()}
       {gameState.screen === 'overworld' && renderOverworld()}
+      {gameState.screen === 'pokemart' && renderPokeMart()}
       {gameState.screen === 'battle' && renderBattle()}
     </div>
   );
