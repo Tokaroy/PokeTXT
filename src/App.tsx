@@ -663,13 +663,15 @@ const executeTurn = (playerMove: Move, opponentMove: Move) => {
     if (opponentFainted) {
       addMessage(`${opponentPokemon.name} fainted!`);
       handleOpponentFainted(opponentPokemon, playerPokemon);
+      // keep input locked until the opponent switch / battle end completes
     } else if (playerFainted) {
       addMessage(`${playerPokemon.name} fainted!`);
       handlePlayerFainted(playerPokemon);
+      // keep input locked until the player switch / whiteout completes
     } else {
       endTurn(playerPokemon, opponentPokemon);
+      setIsProcessingTurn(false);
     }
-    setIsProcessingTurn(false);
   }, 500);
 };
 
@@ -917,6 +919,7 @@ if (opponentPokemon.currentHp <= 0) {
           opponentActive: nextOpponent
         } : null);
         addMessage(`${bs.opponentTrainerName || 'Wild'} sent out ${nextOpponent.name}!`);
+        setIsProcessingTurn(false);
       }, 1500);
     } else {
       // Battle won
@@ -929,9 +932,13 @@ if (opponentPokemon.currentHp <= 0) {
     const bs = battleStateRef.current;
     if (!bs) return;
     
-    // Find next healthy Pokemon in party order
-    const nextHealthyIndex = gameStateRef.current.playerParty.findIndex(p => p.currentHp > 0);
-    
+    // Find next healthy Pokemon in party order (use a fresh snapshot that includes the fainted HP)
+    const partySnapshot = (bs.playerParty ?? gameStateRef.current.playerParty).map(p => {
+      // If the active Pokemon fainted this tick, ensure the snapshot reflects that HP=0
+      if (faintedPlayer && p === bs.playerActive) return faintedPlayer;
+      return p;
+    });
+    const nextHealthyIndex = partySnapshot.findIndex(p => p.currentHp > 0); 
     if (nextHealthyIndex === -1) {
       // No healthy Pokemon left - white out
       addMessage('You whited out!');
@@ -960,19 +967,42 @@ if (opponentPokemon.currentHp <= 0) {
           }))
         }));
         setBattleState(null);
+        setIsProcessingTurn(false);
         addMessage('Your Pokemon were healed at the Pokemon Center!');
       }, 2000);
     } else {
       // Auto-switch to next healthy Pokemon
-      const nextPokemon = gameStateRef.current.playerParty[nextHealthyIndex];
-      addMessage(`${(faintedPlayer ?? bs.playerActive).name} fainted!`);
-      
+      const nextPokemon = partySnapshot[nextHealthyIndex];
+      // Safety: if somehow no healthy Pokemon is actually available, treat as white out
+      if (!nextPokemon || nextPokemon.currentHp <= 0) {
+        addMessage('You whited out!');
+        setTimeout(() => {
+          setGameState(prev => ({ 
+            ...prev, 
+            screen: 'overworld',
+            playerParty: prev.playerParty.map(p => ({
+              ...p,
+              currentHp: p.maxHp,
+              status: 'none' as PrimaryStatus,
+              volatileStatus: {},
+              statStages: generateStatStages(),
+              moves: p.moves.map(m => ({ ...m, currentPp: m.maxPp }))
+            }))
+          }));
+          setBattleState(null);
+          setIsProcessingTurn(false);
+          addMessage('Your Pokemon were healed at the Pokemon Center!');
+        }, 2000);
+        return;
+      }
+
       setTimeout(() => {
         addMessage(`Go! ${nextPokemon.name}!`);
         setBattleState(prev => prev ? {
           ...prev,
           playerActive: nextPokemon
         } : null);
+        setIsProcessingTurn(false);
       }, 1000);
     }
   };
@@ -982,6 +1012,8 @@ if (opponentPokemon.currentHp <= 0) {
     // Use ref snapshot to avoid stale closures in timeouts
     const bs = battleStateRef.current ?? battleState;
     if (!bs) return;
+    // Ensure UI is unlocked when battle ends
+    setIsProcessingTurn(false);
     
     if (won && !bs.isWild && bs.opponentTrainerName) {
       // Find trainer in Gym Leaders, Elite Four, or check if it's a route trainer
