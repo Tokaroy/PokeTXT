@@ -147,10 +147,21 @@ export const applyPrimaryStatus = (
   }
 
   // Apply status
-  const newPokemon: Pokemon = {
-    ...pokemon,
-    status
-  };
+// Note: Some statuses need per-status counters stored in volatileStatus.
+const vs = pokemon.volatileStatus ?? {};
+const newVolatile: VolatileStatus = {
+  ...vs,
+  // Sleep lasts 1-5 turns (Gen III-style); store remaining turns.
+  ...(status === "slp" ? { sleepTurns: Math.floor(Math.random() * 5) + 1 } : {}),
+  // Badly poisoned counter starts at 1 (damage = 1/16 on first tick)
+  ...(status === "tox" ? { toxicTurns: 1 } : {}),
+};
+
+const newPokemon: Pokemon = {
+  ...pokemon,
+  status,
+  volatileStatus: newVolatile
+};
 
   return {
     pokemon: newPokemon,
@@ -273,7 +284,7 @@ export const executeMove = (
         continue;
       }
       
-      const result = applyMoveEffect(attacker, defender, effect, messages);
+      const result = applyMoveEffect(attacker, defender, move, effect, messages);
       attacker = result.attacker;
       defender = result.defender;
     }
@@ -293,6 +304,7 @@ export const executeMove = (
 const applyMoveEffect = (
   attacker: Pokemon,
   defender: Pokemon,
+  move: Move,
   effect: MoveEffect,
   messages: string[]
 ): { attacker: Pokemon; defender: Pokemon } => {
@@ -320,19 +332,29 @@ const applyMoveEffect = (
       break;
 
     case "statStage":
-      if (effect.statChanges) {
-        for (const change of effect.statChanges) {
-          const target = change.stages > 0 ? attacker : defender;
-          const result = applyStageChange(target, change.stat, change.stages);
-          if (change.stages > 0) {
-            attacker = result.pokemon;
-          } else {
-            defender = result.pokemon;
-          }
-          if (result.message) messages.push(result.message);
-        }
-      }
-      break;
+  if (effect.statChanges) {
+    // Heuristic for missing "target" metadata:
+    // - Default: negative stages affect defender, positive stages affect attacker (classic buff/debuff moves)
+    // - Exception: guaranteed self-debuffs on damaging moves (e.g., Overheat, Close Combat) apply to attacker
+    const isGuaranteed = !effect.chance || effect.chance >= 100;
+    const hasPower = move.power > 0;
+    const allNegative = effect.statChanges.every(c => c.stages < 0);
+    const selfDebuffHeuristic = isGuaranteed && hasPower && allNegative;
+
+    for (const change of effect.statChanges) {
+      const targetIsAttacker =
+        selfDebuffHeuristic ? true : (change.stages > 0);
+
+      const target = targetIsAttacker ? attacker : defender;
+      const result = applyStageChange(target, change.stat, change.stages);
+
+      if (targetIsAttacker) attacker = result.pokemon;
+      else defender = result.pokemon;
+
+      if (result.message) messages.push(result.message);
+    }
+  }
+  break;
 
     case "heal":
       if (effect.percent) {
@@ -648,7 +670,7 @@ export const processStatus = (pokemon: Pokemon): { pokemon: Pokemon; message: st
       };
 
     case "brn":
-      const burnDamage = Math.floor(pokemon.maxHp / 16);
+      const burnDamage = Math.floor(pokemon.maxHp / 8);
       return {
         pokemon: { ...pokemon, currentHp: Math.max(0, pokemon.currentHp - burnDamage) },
         message: `${pokemon.name} was hurt by its burn!`
@@ -704,11 +726,30 @@ export const canMove = (pokemon: Pokemon): { canMove: boolean; message: string; 
     }
   }
   if (pokemon.status === "slp") {
-    return { canMove: false, message: `${pokemon.name} is fast asleep!` };
+  const turns = pokemon.volatileStatus.sleepTurns ?? 1;
+  const newTurns = Math.max(0, turns - 1);
+  if (newTurns === 0) {
+    const woke: Pokemon = {
+      ...pokemon,
+      status: "none",
+      volatileStatus: { ...pokemon.volatileStatus, sleepTurns: undefined }
+    };
+    return { canMove: true, message: `${pokemon.name} woke up!`, pokemon: woke };
   }
-  if (pokemon.status === "frz") {
-    return { canMove: false, message: `${pokemon.name} is frozen solid!` };
+  const stillAsleep: Pokemon = {
+    ...pokemon,
+    volatileStatus: { ...pokemon.volatileStatus, sleepTurns: newTurns }
+  };
+  return { canMove: false, message: `${pokemon.name} is fast asleep!`, pokemon: stillAsleep };
+}
+if (pokemon.status === "frz") {
+  // 20% chance to thaw each turn. If thawed, can act immediately.
+  if (Math.random() < 0.2) {
+    const thawed: Pokemon = { ...pokemon, status: "none" };
+    return { canMove: true, message: `${pokemon.name} thawed out!`, pokemon: thawed };
   }
+  return { canMove: false, message: `${pokemon.name} is frozen solid!` };
+}
   // Check confusion from volatile status
   if (pokemon.volatileStatus.confusion && pokemon.volatileStatus.confusion > 0) {
     // 50% chance to hurt self in confusion

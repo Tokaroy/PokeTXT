@@ -6,6 +6,7 @@ import {
   createPokemon, 
   calculateDamage, 
   canMove,
+  processStatus,
   calculateCatchRate,
   gainExperience,
   useItemOnPokemon,
@@ -554,106 +555,121 @@ function App() {
     return { first: Math.random() < 0.5 ? 'player' : 'opponent', playerMove, opponentMove };
   };
 
-  // Execute both moves in priority order
-  const executeTurn = (playerMove: Move, opponentMove: Move) => {
-    if (!battleState) return;
-    
-    setIsProcessingTurn(true);
-    
-    let playerPokemon = battleState.playerActive;
-    let opponentPokemon = battleState.opponentActive;
-    
-    // Determine turn order
-    const turnOrder = determineTurnOrder(playerPokemon, opponentPokemon, playerMove, opponentMove);
-    // Use PP for both moves (immutable)
-    const playerMoveUsed: Move = { ...playerMove, currentPp: Math.max(0, playerMove.currentPp - 1) };
-    const opponentMoveUsed: Move = { ...opponentMove, currentPp: Math.max(0, opponentMove.currentPp - 1) };
-    playerPokemon = decrementMovePP(playerPokemon, playerMove.id);
-    opponentPokemon = decrementMovePP(opponentPokemon, opponentMove.id);
+// Execute both moves in priority order
+const executeTurn = (playerMove: Move, opponentMove: Move) => {
+  if (!battleState) return;
 
-    let playerFainted = false;
-    let opponentFainted = false;
-    const allMessages: string[] = [];
-    
-    // Execute first move
-    if (turnOrder.first === 'player') {
-      // Player goes first
-      const playerResult = executeMove(playerPokemon, opponentPokemon, playerMoveUsed);
-      playerPokemon = playerResult.attacker;
-      opponentPokemon = playerResult.defender;
-      opponentFainted = opponentPokemon.currentHp <= 0;
-      allMessages.push(...playerResult.messages);
-      
-      // Opponent's turn (if still alive)
-      if (!opponentFainted) {
-        const oppResult = executeMove(opponentPokemon, playerPokemon, opponentMoveUsed);
-        opponentPokemon = oppResult.attacker;
-        playerPokemon = oppResult.defender;
-        playerFainted = playerPokemon.currentHp <= 0;
-        allMessages.push(...oppResult.messages);
-      }
-    } else {
-      // Opponent goes first
-      const oppResult = executeMove(opponentPokemon, playerPokemon, opponentMoveUsed);
-      opponentPokemon = oppResult.attacker;
-      playerPokemon = oppResult.defender;
-      playerFainted = playerPokemon.currentHp <= 0;
-      allMessages.push(...oppResult.messages);
-      
-      // Player's turn (if still alive)
-      if (!playerFainted) {
-        const playerResult = executeMove(playerPokemon, opponentPokemon, playerMoveUsed);
-        playerPokemon = playerResult.attacker;
-        opponentPokemon = playerResult.defender;
-        opponentFainted = opponentPokemon.currentHp <= 0;
-        allMessages.push(...playerResult.messages);
-      }
-    }
-    
-    // Update battle state AND party with new Pokemon data (player + opponent parties)
-    // NOTE: do all party updates inside functional updaters to avoid stale closure issues.
-    setBattleState(prev => {
-      if (!prev) return null;
-      const pIndex = prev.playerParty.findIndex(p => p === prev.playerActive);
-      const oIndex = prev.opponentParty.findIndex(p => p === prev.opponentActive);
-      return {
-        ...prev,
-        playerActive: playerPokemon,
-        opponentActive: opponentPokemon,
-        playerParty: pIndex >= 0 ? prev.playerParty.map((p, i) => (i === pIndex ? playerPokemon : p)) : prev.playerParty,
-        opponentParty: oIndex >= 0 ? prev.opponentParty.map((p, i) => (i === oIndex ? opponentPokemon : p)) : prev.opponentParty,
-      };
-    });
+  setIsProcessingTurn(true);
 
-    // Also update the main party array so damage persists after battle
-    setGameState(prev => {
-      const currentBs = battleStateRef.current;
-      if (!currentBs) return prev;
-      const activeIndex = prev.playerParty.findIndex(p => p === currentBs.playerActive);
-      if (activeIndex === -1) return prev;
-      return {
-        ...prev,
-        playerParty: prev.playerParty.map((p, i) => (i === activeIndex ? playerPokemon : p))
-      };
-    });
+  let playerPokemon = battleState.playerActive;
+  let opponentPokemon = battleState.opponentActive;
 
-    // Add all messages to log
-    allMessages.forEach(msg => addMessage(msg));
-    
-    // Check faints and end turn
-    setTimeout(() => {
-      if (opponentFainted) {
-        addMessage(`${opponentPokemon.name} fainted!`);
-        handleOpponentFainted(opponentPokemon, playerPokemon);
-      } else if (playerFainted) {
-        addMessage(`${playerPokemon.name} fainted!`);
-        handlePlayerFainted(playerPokemon);
-      } else {
-        endTurn(playerPokemon, opponentPokemon);
-      }
-      setIsProcessingTurn(false);
-    }, 500);
+  // Determine turn order
+  const turnOrder = determineTurnOrder(playerPokemon, opponentPokemon, playerMove, opponentMove);
+
+  // Use PP for both moves (immutable)
+  const playerMoveUsed: Move = { ...playerMove, currentPp: Math.max(0, playerMove.currentPp - 1) };
+  const opponentMoveUsed: Move = { ...opponentMove, currentPp: Math.max(0, opponentMove.currentPp - 1) };
+  playerPokemon = decrementMovePP(playerPokemon, playerMove.id);
+  opponentPokemon = decrementMovePP(opponentPokemon, opponentMove.id);
+
+  let playerFainted = false;
+  let opponentFainted = false;
+  const allMessages: string[] = [];
+
+  // Check if Pokemon can act (sleep/freeze/paralysis/confusion).
+  // canMove() may return an updated Pokemon (e.g., thawing, waking, confusion self-damage).
+  const attemptAct = (pkmn: Pokemon): { pkmn: Pokemon; canAct: boolean } => {
+    const check = canMove(pkmn);
+    const updated = check.pokemon ?? pkmn;
+    if (check.message) allMessages.push(check.message);
+    if (!check.canMove) return { pkmn: updated, canAct: false };
+    return { pkmn: updated, canAct: true };
   };
+
+  const runMove = (attacker: Pokemon, defender: Pokemon, usedMove: Move): { attacker: Pokemon; defender: Pokemon } => {
+    const act = attemptAct(attacker);
+    attacker = act.pkmn;
+    if (!act.canAct) return { attacker, defender };
+    const res = executeMove(attacker, defender, usedMove);
+    allMessages.push(...res.messages);
+    return { attacker: res.attacker, defender: res.defender };
+  };
+
+  // Execute first move
+  if (turnOrder.first === 'player') {
+    const r1 = runMove(playerPokemon, opponentPokemon, playerMoveUsed);
+    playerPokemon = r1.attacker;
+    opponentPokemon = r1.defender;
+    opponentFainted = opponentPokemon.currentHp <= 0;
+    playerFainted = playerPokemon.currentHp <= 0;
+
+    if (!opponentFainted && !playerFainted) {
+      const r2 = runMove(opponentPokemon, playerPokemon, opponentMoveUsed);
+      opponentPokemon = r2.attacker;
+      playerPokemon = r2.defender;
+      opponentFainted = opponentPokemon.currentHp <= 0;
+      playerFainted = playerPokemon.currentHp <= 0;
+    }
+  } else {
+    const r1 = runMove(opponentPokemon, playerPokemon, opponentMoveUsed);
+    opponentPokemon = r1.attacker;
+    playerPokemon = r1.defender;
+    opponentFainted = opponentPokemon.currentHp <= 0;
+    playerFainted = playerPokemon.currentHp <= 0;
+
+    if (!opponentFainted && !playerFainted) {
+      const r2 = runMove(playerPokemon, opponentPokemon, playerMoveUsed);
+      playerPokemon = r2.attacker;
+      opponentPokemon = r2.defender;
+      opponentFainted = opponentPokemon.currentHp <= 0;
+      playerFainted = playerPokemon.currentHp <= 0;
+    }
+  }
+
+  // Update battle state AND party with new Pokemon data (player + opponent parties)
+  setBattleState(prev => {
+    if (!prev) return null;
+    const pIndex = prev.playerParty.findIndex(p => p === prev.playerActive);
+    const oIndex = prev.opponentParty.findIndex(p => p === prev.opponentActive);
+    return {
+      ...prev,
+      playerActive: playerPokemon,
+      opponentActive: opponentPokemon,
+      playerParty: pIndex >= 0 ? prev.playerParty.map((p, i) => (i === pIndex ? playerPokemon : p)) : prev.playerParty,
+      opponentParty: oIndex >= 0 ? prev.opponentParty.map((p, i) => (i === oIndex ? opponentPokemon : p)) : prev.opponentParty,
+    };
+  });
+
+  // Also update the main party array so damage persists after battle
+  setGameState(prev => {
+    const currentBs = battleStateRef.current;
+    if (!currentBs) return prev;
+    const activeIndex = prev.playerParty.findIndex(p => p === currentBs.playerActive);
+    if (activeIndex === -1) return prev;
+    return {
+      ...prev,
+      playerParty: prev.playerParty.map((p, i) => (i === activeIndex ? playerPokemon : p))
+    };
+  });
+
+  // Add all messages to log
+  allMessages.forEach(msg => addMessage(msg));
+
+  // Check faints and end turn
+  setTimeout(() => {
+    if (opponentFainted) {
+      addMessage(`${opponentPokemon.name} fainted!`);
+      handleOpponentFainted(opponentPokemon, playerPokemon);
+    } else if (playerFainted) {
+      addMessage(`${playerPokemon.name} fainted!`);
+      handlePlayerFainted(playerPokemon);
+    } else {
+      endTurn(playerPokemon, opponentPokemon);
+    }
+    setIsProcessingTurn(false);
+  }, 500);
+};
 
   // Execute player move selection
   const executePlayerMove = (move: Move) => {
@@ -799,6 +815,27 @@ function App() {
       }
     }
     
+// Process primary status damage (burn/poison/toxic) at end of turn
+const ps1 = processStatus(playerPokemon);
+if (ps1.message) addMessage(ps1.message);
+playerPokemon = ps1.pokemon;
+
+const ps2 = processStatus(opponentPokemon);
+if (ps2.message) addMessage(ps2.message);
+opponentPokemon = ps2.pokemon;
+
+// Check faints from end-of-turn status
+if (playerPokemon.currentHp <= 0) {
+  addMessage(`${playerPokemon.name} fainted!`);
+  handlePlayerFainted(playerPokemon);
+  return;
+}
+if (opponentPokemon.currentHp <= 0) {
+  addMessage(`${opponentPokemon.name} fainted!`);
+  handleOpponentFainted(opponentPokemon, playerPokemon);
+  return;
+}
+
     // Update battle state with any changes (player + opponent parties)
     setBattleState(prev => {
       if (!prev) return null;
